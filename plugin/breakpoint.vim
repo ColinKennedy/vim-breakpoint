@@ -19,3 +19,4 @@ command! -bar BreakpointLoad call breakpoint#load()
 command! -bar BreakpointSave call breakpoint#save()
 
 nnoremap <Plug>BreakpointToggle :BreakpointToggle<cr>
+nnoremap <Plug>BreakpointSetCommand :BreakpointSetCommand<cr>
