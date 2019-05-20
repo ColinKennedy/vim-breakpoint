@@ -1,7 +1,10 @@
 " This is so my sign numbering (hopefully) doesn't collide
 " with some other plugin
-let g:breakpoint#counterOffset = 2000
-let s:counter = g:breakpoint#counterOffset + 1
+let g:breakpoint#counterOffset = 2001
+let s:counter = g:breakpoint#counterOffset
+let g:breakpoint_commands = {}
+let s:command_begin = 'commands'
+let s:command_end = 'end'
 
 
 " retuns a string containing the name of the breakpoint file
@@ -64,6 +67,18 @@ function! s:get_git_project_root()
 endfunction
 
 
+function s:get_sign_data(filepath)
+	let l:signs = execute(printf("sign place file=%s", a:filepath))
+    let l:data = []
+	for line in split(l:signs, "\n")[2:]
+		let [line, id, name, priority] = split(line, "  *")
+        call add(l:data, [split(line, "=")[1], split(id, "=")[1], split(name, "=")[1], priority])
+	endfor
+
+    return l:data
+endfunction
+
+
 function! s:get_project_root()
     let l:root = s:get_cmake_project_root()
 
@@ -91,7 +106,7 @@ function! s:read_breakpoint_lines(breakpoints_file_path)
         let l:info = split(l:line, " ")[1]
         let l:file = split(l:info, ":")[0]
         let l:line_number = split(l:info, ":")[1]
-        call add(l:lines, [file, l:line_number])
+        call add(l:lines, [l:file, l:line_number])
     endfor
 
     return l:lines
@@ -112,13 +127,11 @@ function! breakpoint#place(...)
 	let l:fname = expand("%:p")
 
 	" Make sure that no duplicate breakpoints exists in file
-	let l:signs = execute(printf("sign place file=%s", l:fname))
-	for line in split(l:signs, "\n")[2:]
-		let [line, id, name, prio] = split(line, "  *")
-		if name == "name=breakpoint" && split(line, "=")[1] == l:lnum
+    for [line, id, name, priority] in s:get_sign_data(l:fname)
+		if name == "breakpoint" && line == l:lnum
 			return 2
 		endif
-	endfor
+    endfor
 
 	execute printf(":sign place %d line=%d name=breakpoint file=%s",
 				\ s:counter,
@@ -142,22 +155,15 @@ function! breakpoint#remove(...)
 	endif
 	let l:fname = expand("%:p")
 
-	let l:signs = execute(printf("sign place file=%s", l:fname))
+    for [line, id, name, priority] in s:get_sign_data(l:fname)
+        if name != 'breakpoint'
+            continue
+        endif
 
-	for line in split(l:signs, "\n")[2:]
-		let [line, id, name, prio] = split(line, "  *")
-		if (name != "name=breakpoint")
-			continue
-		endif
-
-		let l:cline = split(line, "=")[1]
-		if (l:cline == l:lnum)
-			execute printf(":sign unplace %d file=%s",
-						\ split(id, "=")[1],
-						\ l:fname)
+		if (line == l:lnum)
+			execute printf(":sign unplace %d file=%s", id, l:fname)
 			return 1
 		endif
-
 	endfor
 
 	return 0
@@ -198,6 +204,107 @@ function! s:writelines(path, lines, file_path)
 endfunction
 
 
+function! s:get_breakpoint_command(path, id)
+    let l:key = printf('%s:%s', a:path, a:id)
+
+    if has_key(g:breakpoint_commands, l:key)
+        return g:breakpoint_commands[l:key]
+    endif
+
+    return []
+endfunction
+
+
+function! s:set_breakpoint_command(path, id, command)
+	let g:breakpoint_commands[printf('%s:%s', a:path, a:id)] = a:command
+endfunction
+
+
+function! breakpoint#set_sign_command()
+    call breakpoint#place()
+
+    " Get the commands to save from the user
+    call inputsave()
+    let l:command = split(input('Enter command (use \n for each line): '), '\\n')
+    call inputrestore()
+    call insert(l:command, s:command_begin)
+    let l:command += [s:command_end]
+
+    let l:current_line = line('.')
+    let l:current_file = expand('%:p')
+
+    for [line, id, name, priority] in s:get_sign_data(l:current_file)
+        if name == 'breakpoint' && line == l:current_line
+            call s:set_breakpoint_command(l:current_file, id, l:command)
+        endif
+    endfor
+endfunction
+
+
+function! s:get_next_command(start, lines)
+    let l:lines = []
+    let l:is_in_command = 0
+    for l:line in a:lines[a:start:]
+        if l:is_in_command && l:line =~? '^' . s:command_end
+            call add(l:lines, l:line)
+            break
+        endif
+
+        if l:is_in_command
+            call add(l:lines, l:line)
+            continue
+        endif
+
+        if l:line =~? '^' . s:command_begin
+            let l:is_in_command = 1
+            call add(l:lines, l:line)
+            continue
+        endif
+
+        " If we did not find the beginning of a command block then return early
+        if l:is_in_command == 0
+            return []
+        endif
+    endfor
+
+    return l:lines
+endfunction
+
+
+" returns a -1 if file can't be read
+" otherwise return number of breakpoints loaded
+function! breakpoint#load()
+    let l:breakpoints_file_path = s:get_breakpoint_file_path()
+
+    if !filereadable(l:breakpoints_file_path)
+        return
+    endif
+
+    let l:current_file = expand('%:p')
+    let l:lines = readfile(l:breakpoints_file_path)
+    for l:row in range(len(l:lines))
+        let l:line = l:lines[l:row]
+        if l:line =~? '^break\s\+.\+:\d\+$'
+            let l:info = split(l:line, " ")[1]
+            let l:file = split(l:info, ":")[0]
+            let l:line_number = split(l:info, ":")[1]
+
+            if l:file == l:current_file
+                call breakpoint#place(l:line_number)
+            endif
+            continue
+        endif
+
+        if s:counter != g:breakpoint#counterOffset
+            let l:command = s:get_next_command(l:row, l:lines)
+            if l:command != []
+                call s:set_breakpoint_command(l:current_file, s:counter - 1, l:command)
+            endif
+        endif
+    endfor
+endfunction
+
+
 " saves to file if breakpoints are set
 " deletes the file if no breakpoints exist
 "
@@ -206,35 +313,15 @@ endfunction
 function! breakpoint#save()
 	let l:file_path = expand("%:p")
 	let l:lines = []
-	let l:signs = execute(printf("sign place file=%s", l:file_path))
 
-	for line in split(l:signs, "\n")[2:]
-		let [line, id, name, prio] = split(line, "  *")
-
-		if (name != "name=breakpoint")
+    for [line, id, name, priority] in s:get_sign_data(l:file_path)
+		if (name != 'breakpoint')
 			continue
 		endif
 
-		let l:lines += [printf("break %s:%d",
-            \ l:file_path,
-            \ split(line, "=")[1])]
-	endfor
+		let l:lines += [printf("break %s:%d", l:file_path, line)]
+        let l:lines += s:get_breakpoint_command(l:file_path, id)
+    endfor
 
     call s:writelines(s:get_breakpoint_file_path(), l:lines, l:file_path)
-endfunction
-
-
-" returns a -1 if file can't be read
-" otherwise return number of breakpoints loaded
-function! breakpoint#load()
-    let l:current_file = expand('%:p')
-
-    let l:breakpoint_file = s:get_breakpoint_file_path()
-    for [l:file, l:line] in s:read_breakpoint_lines(l:breakpoint_file)
-        if l:file != l:current_file
-            continue
-        endif
-
-        call breakpoint#place(l:line)
-    endfor
 endfunction
